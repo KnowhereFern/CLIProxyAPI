@@ -1,6 +1,9 @@
 package conversation
 
-import "strings"
+import (
+	"regexp"
+	"strings"
+)
 
 // NormalizeRole converts a role to a standard format (lowercase, 'model' -> 'assistant').
 func NormalizeRole(role string) string {
@@ -59,4 +62,23 @@ func BuildPrompt(msgs []Message, tagged bool, appendAssistant bool) string {
 		sb.WriteString(AddRoleTag("assistant", "", true))
 	}
 	return strings.TrimSpace(sb.String())
+}
+
+var reXMLAnyTag = regexp.MustCompile(`(?s)<\s*[^>]+>`)
+
+// AppendXMLWrapHintIfNeeded appends an XML wrap hint to messages containing XML-like blocks.
+func AppendXMLWrapHintIfNeeded(msgs []Message, disable bool) []Message {
+	if disable {
+		return msgs
+	}
+	const xmlWrapHint = "\nFor any xml block, e.g. tool call, always wrap it with: \n`````xml\n...\n`````\n"
+	out := make([]Message, 0, len(msgs))
+	for _, m := range msgs {
+		t := m.Text
+		if reXMLAnyTag.MatchString(t) {
+			t = t + xmlWrapHint
+		}
+		out = append(out, Message{Role: m.Role, Text: t})
+	}
+	return out
 }

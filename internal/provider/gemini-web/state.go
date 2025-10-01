@@ -201,17 +201,6 @@ func equalStringSlice(a, b []string) bool {
 	return true
 }
 
-func storedMessagesToRoleText(stored []conversation.StoredMessage) []conversation.Message {
-	if len(stored) == 0 {
-		return nil
-	}
-	converted := make([]conversation.Message, len(stored))
-	for i, msg := range stored {
-		converted[i] = conversation.Message{Role: msg.Role, Text: msg.Content}
-	}
-	return converted
-}
-
 func (s *GeminiWebState) findConversationByMetadata(model string, metadata []string) ([]conversation.Message, bool) {
 	if len(metadata) == 0 {
 		return nil, false
@@ -225,7 +214,7 @@ func (s *GeminiWebState) findConversationByMetadata(model string, metadata []str
 		if !equalStringSlice(rec.Metadata, metadata) {
 			continue
 		}
-		return cloneRoleTextSlice(storedMessagesToRoleText(rec.Messages)), true
+		return cloneRoleTextSlice(conversation.StoredToMessages(rec.Messages)), true
 	}
 	return nil, false
 }
@@ -422,7 +411,7 @@ func (s *GeminiWebState) prepare(ctx context.Context, modelName string, rawJSON 
 	}
 
 	enableXML := s.cfg != nil && s.cfg.GeminiWeb.CodeMode
-	useMsgs = AppendXMLWrapHintIfNeeded(useMsgs, !enableXML)
+	useMsgs = conversation.AppendXMLWrapHintIfNeeded(useMsgs, !enableXML)
 
 	res.prompt = conversation.BuildPrompt(useMsgs, res.tagged, res.tagged)
 	if strings.TrimSpace(res.prompt) == "" {
@@ -681,7 +670,7 @@ func (s *GeminiWebState) findReusableSession(modelName string, msgs []conversati
 	if !ok {
 		return nil
 	}
-	history := cloneRoleTextSlice(storedMessagesToRoleText(rec.Messages))
+	history := cloneRoleTextSlice(conversation.StoredToMessages(rec.Messages))
 	if len(history) == 0 {
 		return nil
 	}

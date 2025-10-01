@@ -3,35 +3,12 @@ package geminiwebapi
 import (
 	"fmt"
 	"math"
-	"regexp"
 	"strings"
 	"unicode/utf8"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	conversation "github.com/router-for-me/CLIProxyAPI/v6/internal/provider/gemini-web/conversation"
 	"github.com/tidwall/gjson"
 )
-
-var (
-	reXMLAnyTag = regexp.MustCompile(`(?s)<\s*[^>]+>`)
-)
-
-// AppendXMLWrapHintIfNeeded appends an XML wrap hint to messages containing XML-like blocks.
-func AppendXMLWrapHintIfNeeded(msgs []conversation.Message, disable bool) []conversation.Message {
-	if disable {
-		return msgs
-	}
-	const xmlWrapHint = "\nFor any xml block, e.g. tool call, always wrap it with: \n`````xml\n...\n`````\n"
-	out := make([]conversation.Message, 0, len(msgs))
-	for _, m := range msgs {
-		t := m.Text
-		if reXMLAnyTag.MatchString(t) {
-			t = t + xmlWrapHint
-		}
-		out = append(out, conversation.Message{Role: m.Role, Text: t})
-	}
-	return out
-}
 
 // EstimateTotalTokensFromRawJSON estimates token count by summing text parts.
 func EstimateTotalTokensFromRawJSON(rawJSON []byte) int {
