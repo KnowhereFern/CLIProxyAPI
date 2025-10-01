@@ -20,6 +20,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
+	conversation "github.com/router-for-me/CLIProxyAPI/v6/internal/provider/gemini-web/conversation"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 )
@@ -173,8 +174,8 @@ func (g GeneratedImage) Save(path string, filename string, fullSize bool, verbos
 
 // Request parsing & file helpers -------------------------------------------
 
-func ParseMessagesAndFiles(rawJSON []byte) ([]RoleText, [][]byte, []string, [][]int, error) {
-	var messages []RoleText
+func ParseMessagesAndFiles(rawJSON []byte) ([]conversation.Message, [][]byte, []string, [][]int, error) {
+	var messages []conversation.Message
 	var files [][]byte
 	var mimes []string
 	var perMsgFileIdx [][]int
@@ -182,7 +183,7 @@ func ParseMessagesAndFiles(rawJSON []byte) ([]RoleText, [][]byte, []string, [][]
 	contents := gjson.GetBytes(rawJSON, "contents")
 	if contents.Exists() {
 		contents.ForEach(func(_, content gjson.Result) bool {
-			role := NormalizeRole(content.Get("role").String())
+			role := conversation.NormalizeRole(content.Get("role").String())
 			var b strings.Builder
 			startFile := len(files)
 			content.Get("parts").ForEach(func(_, part gjson.Result) bool {
@@ -207,7 +208,7 @@ func ParseMessagesAndFiles(rawJSON []byte) ([]RoleText, [][]byte, []string, [][]
 				}
 				return true
 			})
-			messages = append(messages, RoleText{Role: role, Text: b.String()})
+			messages = append(messages, conversation.Message{Role: role, Text: b.String()})
 			endFile := len(files)
 			if endFile > startFile {
 				idxs := make([]int, 0, endFile-startFile)

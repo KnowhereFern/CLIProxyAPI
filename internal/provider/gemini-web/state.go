@@ -3,10 +3,8 @@ package geminiwebapi
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -23,7 +21,6 @@ import (
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
-	bolt "go.etcd.io/bbolt"
 )
 
 const (
@@ -47,7 +44,7 @@ type GeminiWebState struct {
 
 	convMu    sync.RWMutex
 	convStore map[string][]string
-	convData  map[string]ConversationRecord
+	convData  map[string]conversation.ConversationRecord
 	convIndex map[string]string
 
 	lastRefresh time.Time
@@ -58,7 +55,7 @@ type GeminiWebState struct {
 
 type reuseComputation struct {
 	metadata []string
-	history  []RoleText
+	history  []conversation.Message
 	overlap  int
 }
 
@@ -69,7 +66,7 @@ func NewGeminiWebState(cfg *config.Config, token *gemini.GeminiWebTokenStorage, 
 		storagePath: storagePath,
 		authLabel:   strings.TrimSpace(authLabel),
 		convStore:   make(map[string][]string),
-		convData:    make(map[string]ConversationRecord),
+		convData:    make(map[string]conversation.ConversationRecord),
 		convIndex:   make(map[string]string),
 	}
 	suffix := conversation.Sha256Hex(token.Secure1PSID)
@@ -142,10 +139,10 @@ func (s *GeminiWebState) loadConversationCaches() {
 	if path == "" {
 		return
 	}
-	if store, err := LoadConvStore(path); err == nil {
+	if store, err := conversation.LoadConvStore(path); err == nil {
 		s.convStore = store
 	}
-	if items, index, err := LoadConvData(path); err == nil {
+	if items, index, err := conversation.LoadConvData(path); err == nil {
 		s.convData = items
 		s.convIndex = index
 	}
@@ -158,14 +155,14 @@ func (s *GeminiWebState) convPath() string {
 		// Use accountID directly as base name; ConvBoltPath will append .bolt.
 		base = s.accountID
 	}
-	return ConvBoltPath(base)
+	return conversation.ConvBoltPath(base)
 }
 
-func cloneRoleTextSlice(in []RoleText) []RoleText {
+func cloneRoleTextSlice(in []conversation.Message) []conversation.Message {
 	if len(in) == 0 {
 		return nil
 	}
-	out := make([]RoleText, len(in))
+	out := make([]conversation.Message, len(in))
 	copy(out, in)
 	return out
 }
@@ -179,7 +176,7 @@ func cloneStringSlice(in []string) []string {
 	return out
 }
 
-func longestHistoryOverlap(history, incoming []RoleText) int {
+func longestHistoryOverlap(history, incoming []conversation.Message) int {
 	max := len(history)
 	if len(incoming) < max {
 		max = len(incoming)
@@ -204,18 +201,18 @@ func equalStringSlice(a, b []string) bool {
 	return true
 }
 
-func storedMessagesToRoleText(stored []conversation.StoredMessage) []RoleText {
+func storedMessagesToRoleText(stored []conversation.StoredMessage) []conversation.Message {
 	if len(stored) == 0 {
 		return nil
 	}
-	converted := make([]RoleText, len(stored))
+	converted := make([]conversation.Message, len(stored))
 	for i, msg := range stored {
-		converted[i] = RoleText{Role: msg.Role, Text: msg.Content}
+		converted[i] = conversation.Message{Role: msg.Role, Text: msg.Content}
 	}
 	return converted
 }
 
-func (s *GeminiWebState) findConversationByMetadata(model string, metadata []string) ([]RoleText, bool) {
+func (s *GeminiWebState) findConversationByMetadata(model string, metadata []string) ([]conversation.Message, bool) {
 	if len(metadata) == 0 {
 		return nil, false
 	}
@@ -305,7 +302,7 @@ type geminiWebPrepared struct {
 	prompt        string
 	uploaded      []string
 	chat          *ChatSession
-	cleaned       []RoleText
+	cleaned       []conversation.Message
 	underlying    string
 	reuse         bool
 	tagged        bool
@@ -325,9 +322,9 @@ func (s *GeminiWebState) prepare(ctx context.Context, modelName string, rawJSON 
 	if err != nil {
 		return nil, &interfaces.ErrorMessage{StatusCode: 400, Error: fmt.Errorf("bad request: %w", err)}
 	}
-	cleaned := SanitizeAssistantMessages(messages)
+	cleaned := conversation.SanitizeAssistantMessages(messages)
 	fullCleaned := cloneRoleTextSlice(cleaned)
-	res.underlying = MapAliasToUnderlying(modelName)
+	res.underlying = conversation.MapAliasToUnderlying(modelName)
 	model, err := ModelFromName(res.underlying)
 	if err != nil {
 		return nil, &interfaces.ErrorMessage{StatusCode: 400, Error: err}
@@ -360,7 +357,7 @@ func (s *GeminiWebState) prepare(ctx context.Context, modelName string, rawJSON 
 			}
 			useMsgs = delta
 			if len(delta) == 0 && len(cleaned) > 0 {
-				useMsgs = []RoleText{cleaned[len(cleaned)-1]}
+				useMsgs = []conversation.Message{cleaned[len(cleaned)-1]}
 			}
 			if len(useMsgs) == 1 && len(messages) > 0 && len(msgFileIdx) == len(messages) {
 				lastIdx := len(msgFileIdx) - 1
@@ -388,8 +385,8 @@ func (s *GeminiWebState) prepare(ctx context.Context, modelName string, rawJSON 
 			}
 		} else {
 			if len(cleaned) >= 2 && strings.EqualFold(cleaned[len(cleaned)-2].Role, "assistant") {
-				keyUnderlying := AccountMetaKey(s.accountID, res.underlying)
-				keyAlias := AccountMetaKey(s.accountID, modelName)
+				keyUnderlying := conversation.AccountMetaKey(s.accountID, res.underlying)
+				keyAlias := conversation.AccountMetaKey(s.accountID, modelName)
 				s.convMu.RLock()
 				fallbackMeta := s.convStore[keyUnderlying]
 				if len(fallbackMeta) == 0 {
@@ -398,7 +395,7 @@ func (s *GeminiWebState) prepare(ctx context.Context, modelName string, rawJSON 
 				s.convMu.RUnlock()
 				if len(fallbackMeta) > 0 {
 					meta = fallbackMeta
-					useMsgs = []RoleText{cleaned[len(cleaned)-1]}
+					useMsgs = []conversation.Message{cleaned[len(cleaned)-1]}
 					res.reuse = true
 					filesSubset = nil
 					mimesSubset = nil
@@ -406,8 +403,8 @@ func (s *GeminiWebState) prepare(ctx context.Context, modelName string, rawJSON 
 			}
 		}
 	} else {
-		keyUnderlying := AccountMetaKey(s.accountID, res.underlying)
-		keyAlias := AccountMetaKey(s.accountID, modelName)
+		keyUnderlying := conversation.AccountMetaKey(s.accountID, res.underlying)
+		keyAlias := conversation.AccountMetaKey(s.accountID, modelName)
 		s.convMu.RLock()
 		if v, ok := s.convStore[keyUnderlying]; ok && len(v) > 0 {
 			meta = v
@@ -419,7 +416,7 @@ func (s *GeminiWebState) prepare(ctx context.Context, modelName string, rawJSON 
 
 	res.cleaned = fullCleaned
 
-	res.tagged = NeedRoleTags(useMsgs)
+	res.tagged = conversation.NeedRoleTags(useMsgs)
 	if res.reuse && len(useMsgs) == 1 {
 		res.tagged = false
 	}
@@ -427,7 +424,7 @@ func (s *GeminiWebState) prepare(ctx context.Context, modelName string, rawJSON 
 	enableXML := s.cfg != nil && s.cfg.GeminiWeb.CodeMode
 	useMsgs = AppendXMLWrapHintIfNeeded(useMsgs, !enableXML)
 
-	res.prompt = BuildPrompt(useMsgs, res.tagged, res.tagged)
+	res.prompt = conversation.BuildPrompt(useMsgs, res.tagged, res.tagged)
 	if strings.TrimSpace(res.prompt) == "" {
 		return nil, &interfaces.ErrorMessage{StatusCode: 400, Error: errors.New("bad request: empty prompt after filtering system/thought content")}
 	}
@@ -517,8 +514,8 @@ func (s *GeminiWebState) persistConversation(modelName string, prep *geminiWebPr
 	}
 	metadata := prep.chat.Metadata()
 	if len(metadata) > 0 {
-		keyUnderlying := AccountMetaKey(s.accountID, prep.underlying)
-		keyAlias := AccountMetaKey(s.accountID, modelName)
+		keyUnderlying := conversation.AccountMetaKey(s.accountID, prep.underlying)
+		keyAlias := conversation.AccountMetaKey(s.accountID, modelName)
 		s.convMu.Lock()
 		s.convStore[keyUnderlying] = metadata
 		s.convStore[keyAlias] = metadata
@@ -532,13 +529,13 @@ func (s *GeminiWebState) persistConversation(modelName string, prep *geminiWebPr
 			storeSnapshot[k] = cp
 		}
 		s.convMu.Unlock()
-		_ = SaveConvStore(s.convPath(), storeSnapshot)
+		_ = conversation.SaveConvStore(s.convPath(), storeSnapshot)
 	}
 
 	if !s.useReusableContext() {
 		return
 	}
-	rec, ok := BuildConversationRecord(prep.underlying, s.stableClientID, prep.cleaned, output, metadata)
+	rec, ok := buildConversationRecord(prep.underlying, s.stableClientID, prep.cleaned, output, metadata)
 	if !ok {
 		return
 	}
@@ -592,7 +589,7 @@ func (s *GeminiWebState) persistConversation(modelName string, prep *geminiWebPr
 			}
 		}
 	}
-	dataSnapshot := make(map[string]ConversationRecord, len(s.convData))
+	dataSnapshot := make(map[string]conversation.ConversationRecord, len(s.convData))
 	for k, v := range s.convData {
 		dataSnapshot[k] = v
 	}
@@ -601,7 +598,7 @@ func (s *GeminiWebState) persistConversation(modelName string, prep *geminiWebPr
 		indexSnapshot[k] = v
 	}
 	s.convMu.Unlock()
-	_ = SaveConvData(s.convPath(), dataSnapshot, indexSnapshot)
+	_ = conversation.SaveConvData(s.convPath(), dataSnapshot, indexSnapshot)
 }
 
 func (s *GeminiWebState) addAPIResponseData(ctx context.Context, line []byte) {
@@ -655,7 +652,7 @@ func (s *GeminiWebState) useReusableContext() bool {
 	return s.cfg.GeminiWeb.Context
 }
 
-func (s *GeminiWebState) reuseFromPending(modelName string, msgs []RoleText) *reuseComputation {
+func (s *GeminiWebState) reuseFromPending(modelName string, msgs []conversation.Message) *reuseComputation {
 	match := s.consumePendingMatch()
 	if match == nil {
 		return nil
@@ -675,12 +672,12 @@ func (s *GeminiWebState) reuseFromPending(modelName string, msgs []RoleText) *re
 	return &reuseComputation{metadata: metadata, history: history, overlap: overlap}
 }
 
-func (s *GeminiWebState) findReusableSession(modelName string, msgs []RoleText) *reuseComputation {
+func (s *GeminiWebState) findReusableSession(modelName string, msgs []conversation.Message) *reuseComputation {
 	s.convMu.RLock()
 	items := s.convData
 	index := s.convIndex
 	s.convMu.RUnlock()
-	rec, metadata, overlap, ok := FindReusableSessionIn(items, index, s.stableClientID, s.accountID, modelName, msgs)
+	rec, metadata, overlap, ok := conversation.FindReusableSessionIn(items, index, s.stableClientID, s.accountID, modelName, msgs)
 	if !ok {
 		return nil
 	}
@@ -734,217 +731,19 @@ func appendAPIResponseChunk(ctx context.Context, cfg *config.Config, chunk []byt
 	}
 }
 
-// ConvBoltPath returns the BoltDB file path used for both account metadata and conversation data.
-// Different logical datasets are kept in separate buckets within this single DB file.
-func ConvBoltPath(tokenFilePath string) string {
-	wd, err := os.Getwd()
-	if err != nil || wd == "" {
-		wd = "."
-	}
-	convDir := filepath.Join(wd, "conv")
-	base := strings.TrimSuffix(filepath.Base(tokenFilePath), filepath.Ext(tokenFilePath))
-	return filepath.Join(convDir, base+".bolt")
-}
-
-// LoadConvStore reads the account-level metadata store from disk.
-func LoadConvStore(path string) (map[string][]string, error) {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return nil, err
-	}
-	db, err := bolt.Open(path, 0o600, &bolt.Options{Timeout: time.Second})
-	if err != nil {
-		return nil, err
-	}
-	defer func() {
-		_ = db.Close()
-	}()
-	out := map[string][]string{}
-	err = db.View(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte("account_meta"))
-		if b == nil {
-			return nil
-		}
-		return b.ForEach(func(k, v []byte) error {
-			var arr []string
-			if len(v) > 0 {
-				if e := json.Unmarshal(v, &arr); e != nil {
-					// Skip malformed entries instead of failing the whole load
-					return nil
-				}
-			}
-			out[string(k)] = arr
-			return nil
-		})
-	})
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-// SaveConvStore writes the account-level metadata store to disk atomically.
-func SaveConvStore(path string, data map[string][]string) error {
-	if data == nil {
-		data = map[string][]string{}
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	db, err := bolt.Open(path, 0o600, &bolt.Options{Timeout: 2 * time.Second})
-	if err != nil {
-		return err
-	}
-	defer func() {
-		_ = db.Close()
-	}()
-	return db.Update(func(tx *bolt.Tx) error {
-		// Recreate bucket to reflect the given snapshot exactly.
-		if b := tx.Bucket([]byte("account_meta")); b != nil {
-			if err = tx.DeleteBucket([]byte("account_meta")); err != nil {
-				return err
-			}
-		}
-		b, errCreateBucket := tx.CreateBucket([]byte("account_meta"))
-		if errCreateBucket != nil {
-			return errCreateBucket
-		}
-		for k, v := range data {
-			enc, e := json.Marshal(v)
-			if e != nil {
-				return e
-			}
-			if e = b.Put([]byte(k), enc); e != nil {
-				return e
-			}
-		}
-		return nil
-	})
-}
-
-// AccountMetaKey builds the key for account-level metadata map.
-func AccountMetaKey(email, modelName string) string {
-	return fmt.Sprintf("account-meta|%s|%s", email, modelName)
-}
-
-// LoadConvData reads the full conversation data and index from disk.
-func LoadConvData(path string) (map[string]ConversationRecord, map[string]string, error) {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return nil, nil, err
-	}
-	db, err := bolt.Open(path, 0o600, &bolt.Options{Timeout: time.Second})
-	if err != nil {
-		return nil, nil, err
-	}
-	defer func() {
-		_ = db.Close()
-	}()
-	items := map[string]ConversationRecord{}
-	index := map[string]string{}
-	err = db.View(func(tx *bolt.Tx) error {
-		// Load conv_items
-		if b := tx.Bucket([]byte("conv_items")); b != nil {
-			if e := b.ForEach(func(k, v []byte) error {
-				var rec ConversationRecord
-				if len(v) > 0 {
-					if e2 := json.Unmarshal(v, &rec); e2 != nil {
-						// Skip malformed
-						return nil
-					}
-					items[string(k)] = rec
-				}
-				return nil
-			}); e != nil {
-				return e
-			}
-		}
-		// Load conv_index
-		if b := tx.Bucket([]byte("conv_index")); b != nil {
-			if e := b.ForEach(func(k, v []byte) error {
-				index[string(k)] = string(v)
-				return nil
-			}); e != nil {
-				return e
-			}
-		}
-		return nil
-	})
-	if err != nil {
-		return nil, nil, err
-	}
-	return items, index, nil
-}
-
-// SaveConvData writes the full conversation data and index to disk atomically.
-func SaveConvData(path string, items map[string]ConversationRecord, index map[string]string) error {
-	if items == nil {
-		items = map[string]ConversationRecord{}
-	}
-	if index == nil {
-		index = map[string]string{}
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	db, err := bolt.Open(path, 0o600, &bolt.Options{Timeout: 2 * time.Second})
-	if err != nil {
-		return err
-	}
-	defer func() {
-		_ = db.Close()
-	}()
-	return db.Update(func(tx *bolt.Tx) error {
-		// Recreate items bucket
-		if b := tx.Bucket([]byte("conv_items")); b != nil {
-			if err = tx.DeleteBucket([]byte("conv_items")); err != nil {
-				return err
-			}
-		}
-		bi, errCreateBucket := tx.CreateBucket([]byte("conv_items"))
-		if errCreateBucket != nil {
-			return errCreateBucket
-		}
-		for k, rec := range items {
-			enc, e := json.Marshal(rec)
-			if e != nil {
-				return e
-			}
-			if e = bi.Put([]byte(k), enc); e != nil {
-				return e
-			}
-		}
-
-		// Recreate index bucket
-		if b := tx.Bucket([]byte("conv_index")); b != nil {
-			if err = tx.DeleteBucket([]byte("conv_index")); err != nil {
-				return err
-			}
-		}
-		bx, errCreateBucket := tx.CreateBucket([]byte("conv_index"))
-		if errCreateBucket != nil {
-			return errCreateBucket
-		}
-		for k, v := range index {
-			if e := bx.Put([]byte(k), []byte(v)); e != nil {
-				return e
-			}
-		}
-		return nil
-	})
-}
-
-// BuildConversationRecord constructs a ConversationRecord from history and the latest output.
+// buildConversationRecord constructs a ConversationRecord from history and the latest output.
 // Returns false when output is empty or has no candidates.
-func BuildConversationRecord(model, clientID string, history []RoleText, output *ModelOutput, metadata []string) (ConversationRecord, bool) {
+func buildConversationRecord(model, clientID string, history []conversation.Message, output *ModelOutput, metadata []string) (conversation.ConversationRecord, bool) {
 	if output == nil || len(output.Candidates) == 0 {
-		return ConversationRecord{}, false
+		return conversation.ConversationRecord{}, false
 	}
 	text := ""
 	if t := output.Candidates[0].Text; t != "" {
-		text = RemoveThinkTags(t)
+		text = conversation.RemoveThinkTags(t)
 	}
-	final := append([]RoleText{}, history...)
-	final = append(final, RoleText{Role: "assistant", Text: text})
-	rec := ConversationRecord{
+	final := append([]conversation.Message{}, history...)
+	final = append(final, conversation.Message{Role: "assistant", Text: text})
+	rec := conversation.ConversationRecord{
 		Model:     model,
 		ClientID:  clientID,
 		Metadata:  metadata,
@@ -953,65 +752,4 @@ func BuildConversationRecord(model, clientID string, history []RoleText, output 
 		UpdatedAt: time.Now(),
 	}
 	return rec, true
-}
-
-// FindByMessageListIn looks up a conversation record by hashed message list.
-// It attempts both the stable client ID and a legacy email-based ID.
-func FindByMessageListIn(items map[string]ConversationRecord, index map[string]string, stableClientID, email, model string, msgs []RoleText) (ConversationRecord, bool) {
-	stored := conversation.ToStoredMessages(msgs)
-	stableHash := conversation.HashConversationForAccount(stableClientID, model, stored)
-	fallbackHash := conversation.HashConversationForAccount(email, model, stored)
-
-	// Try stable hash via index indirection first
-	if key, ok := index["hash:"+stableHash]; ok {
-		if rec, ok2 := items[key]; ok2 {
-			return rec, true
-		}
-	}
-	if rec, ok := items[stableHash]; ok {
-		return rec, true
-	}
-	// Fallback to legacy hash (email-based)
-	if key, ok := index["hash:"+fallbackHash]; ok {
-		if rec, ok2 := items[key]; ok2 {
-			return rec, true
-		}
-	}
-	if rec, ok := items[fallbackHash]; ok {
-		return rec, true
-	}
-	return ConversationRecord{}, false
-}
-
-// FindConversationIn tries exact then sanitized assistant messages.
-func FindConversationIn(items map[string]ConversationRecord, index map[string]string, stableClientID, email, model string, msgs []RoleText) (ConversationRecord, bool) {
-	if len(msgs) == 0 {
-		return ConversationRecord{}, false
-	}
-	if rec, ok := FindByMessageListIn(items, index, stableClientID, email, model, msgs); ok {
-		return rec, true
-	}
-	if rec, ok := FindByMessageListIn(items, index, stableClientID, email, model, SanitizeAssistantMessages(msgs)); ok {
-		return rec, true
-	}
-	return ConversationRecord{}, false
-}
-
-// FindReusableSessionIn returns reusable metadata and the remaining message suffix.
-func FindReusableSessionIn(items map[string]ConversationRecord, index map[string]string, stableClientID, email, model string, msgs []RoleText) (ConversationRecord, []string, int, bool) {
-	if len(msgs) < 2 {
-		return ConversationRecord{}, nil, 0, false
-	}
-	searchEnd := len(msgs)
-	for searchEnd >= 2 {
-		sub := msgs[:searchEnd]
-		tail := sub[len(sub)-1]
-		if strings.EqualFold(tail.Role, "assistant") || strings.EqualFold(tail.Role, "system") {
-			if rec, ok := FindConversationIn(items, index, stableClientID, email, model, sub); ok {
-				return rec, rec.Metadata, searchEnd, true
-			}
-		}
-		searchEnd--
-	}
-	return ConversationRecord{}, nil, 0, false
 }

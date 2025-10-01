@@ -4,10 +4,6 @@ import (
 	"fmt"
 	"html"
 	"net/http"
-	"time"
-
-	conversation "github.com/router-for-me/CLIProxyAPI/v6/internal/provider/gemini-web/conversation"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 )
 
 // Gemini web endpoints and default headers ----------------------------------
@@ -103,30 +99,6 @@ const (
 	ErrorModelHeaderInvalid   = 1052
 	ErrorIPTemporarilyBlocked = 1060
 )
-
-func EnsureGeminiWebAliasMap() { conversation.EnsureGeminiWebAliasMap() }
-
-func GetGeminiWebAliasedModels() []*registry.ModelInfo {
-	return conversation.GetGeminiWebAliasedModels()
-}
-
-func MapAliasToUnderlying(name string) string { return conversation.MapAliasToUnderlying(name) }
-
-func AliasFromModelID(modelID string) string { return conversation.AliasFromModelID(modelID) }
-
-// Conversation domain structures -------------------------------------------
-type RoleText = conversation.Message
-
-type StoredMessage = conversation.StoredMessage
-
-type ConversationRecord struct {
-	Model     string          `json:"model"`
-	ClientID  string          `json:"client_id"`
-	Metadata  []string        `json:"metadata,omitempty"`
-	Messages  []StoredMessage `json:"messages"`
-	CreatedAt time.Time       `json:"created_at"`
-	UpdatedAt time.Time       `json:"updated_at"`
-}
 
 type Candidate struct {
 	RCID            string

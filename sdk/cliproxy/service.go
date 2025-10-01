@@ -14,7 +14,6 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	geminiwebclient "github.com/router-for-me/CLIProxyAPI/v6/internal/provider/gemini-web"
 	conversation "github.com/router-for-me/CLIProxyAPI/v6/internal/provider/gemini-web/conversation"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor"
@@ -489,7 +488,7 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 	case "gemini-cli":
 		models = registry.GetGeminiCLIModels()
 	case "gemini-web":
-		models = geminiwebclient.GetGeminiWebAliasedModels()
+		models = conversation.GetGeminiWebAliasedModels()
 	case "claude":
 		models = registry.GetClaudeModels()
 	case "codex":
